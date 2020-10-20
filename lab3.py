@@ -5,14 +5,15 @@ import tensorflow as tf
 from tensorflow import keras
 import tensorflow.keras.backend as K
 import random
-# from scipy.misc import imsave, imresize
+import imageio
+import shutil
 from PIL import Image
 from scipy.optimize import fmin_l_bfgs_b   # https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.fmin_l_bfgs_b.html
 from tensorflow.keras.applications import vgg19
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
-from tensorflow.python.keras.models import Model 
+from tensorflow.python.keras.models import Model
 import warnings
-import datetime
+import time
 
 tf.compat.v1.disable_eager_execution()
 random.seed(1618)
@@ -33,11 +34,11 @@ CONTENT_IMG_W = 500
 STYLE_IMG_H = 500
 STYLE_IMG_W = 500
 
-CONTENT_WEIGHT = 0.0003125    # Alpha weight.
-STYLE_WEIGHT = 1.0      # Beta weight.
-TOTAL_WEIGHT = 1e-5
+CONTENT_WEIGHT = 1    # Alpha weight.
+STYLE_WEIGHT = 1000      # Beta weight.
+TOTAL_WEIGHT = 100
 
-TRANSFER_ROUNDS = 3
+TRANSFER_ROUNDS = 50
 
 SAVE_PATH = None
 
@@ -69,15 +70,6 @@ def gramMatrix(x):
     return gram
 
 
-def getGradients(x):
-    global globalLoss, globalGrads
-    assert globalLoss is not None
-    grads = np.copy(globalGrads)
-    globalLoss = None
-    globalGrads = None
-    return grads
-
-
 def getOutput(layers, model):
     output = list()
     for layer in layers:
@@ -88,21 +80,10 @@ def getOutput(layers, model):
 
 #========================<Loss Function Builder Functions>======================
 
-def styleLoss(styles, gStyles):
-    N = 3
+def styleLoss(style, gStyle):
+    N = K.int_shape(gStyle)[0]
     M = CONTENT_IMG_H * CONTENT_IMG_W
-    return K.sum(K.square(gramMatrix(gStyles) - gramMatrix(styles))) / (4. * (N ** 2) * (M ** 2))
-    # styleLoss = K.variable(0.)
-    # w = 0.2
-    # for style, gStyle in zip(styles, gStyles):  
-    #     M_l = CONTENT_IMG_H * CONTENT_IMG_W
-    #     N_l = K.int_shape(gStyle)[0]
-    #     # print('(%s, %s)' % (N_l, M_l))
-    #     loss = w * (K.sum(K.square(gramMatrix(gStyle) - gramMatrix(style))) / (4. * (N_l ** 2) * (M_l ** 2)))
-    #     loss = K.print_tensor(loss)
-    #     styleLoss.assign_add(loss)
-    # # print('styleLoss:', styleLoss)
-    # return styleLoss
+    return K.sum(K.square(gramMatrix(gStyle) - gramMatrix(style))) / (4. * (N ** 2) * (M ** 2))
 
 
 def contentLoss(content, gContent):
@@ -119,7 +100,6 @@ def totalLoss(x):
 
 def calculateLoss(x):
     global globalLoss, globalGrads, getLossAndGradients
-    assert globalLoss is None
     x = x.reshape((1, CONTENT_IMG_H, CONTENT_IMG_W, 3))
     outs = getLossAndGradients([x])
     loss = outs[0]
@@ -127,6 +107,14 @@ def calculateLoss(x):
     globalLoss = loss
     globalGrads = grads
     return loss
+
+
+def getGradients(x):
+    global globalLoss, globalGrads
+    grads = np.copy(globalGrads)
+    globalLoss = None
+    globalGrads = None
+    return grads
 
 
 
@@ -137,8 +125,8 @@ def getRawData():
     print("      Content image URL:  \"%s\"." % CONTENT_IMG_PATH)
     print("      Style image URL:    \"%s\"." % STYLE_IMG_PATH)
     cImg = load_img(CONTENT_IMG_PATH)
-    tImg = cImg.copy()
-    # tImg = np.random.randint(256, size=(CONTENT_IMG_H, CONTENT_IMG_W, 3)).astype('float64')
+    tImg = load_img(CONTENT_IMG_PATH)
+    #tImg = np.random.randint(256, size=(CONTENT_IMG_H, CONTENT_IMG_W, 3)).astype('float64')
     sImg = load_img(STYLE_IMG_PATH)
     print("      Images have been loaded.")
     return ((cImg, CONTENT_IMG_H, CONTENT_IMG_W), (sImg, STYLE_IMG_H, STYLE_IMG_W), (tImg, CONTENT_IMG_H, CONTENT_IMG_W))
@@ -168,8 +156,8 @@ Save the newly generated and deprocessed images.
 '''
 def styleTransfer(cData, sData, tData):
     print("   Building transfer model.")
-    contentTensor = K.constant(cData) # variable?
-    styleTensor = K.constant(sData)
+    contentTensor = K.variable(cData)
+    styleTensor = K.variable(sData)
     genTensor = K.placeholder((1, CONTENT_IMG_H, CONTENT_IMG_W, 3))
     inputTensor = K.concatenate([contentTensor, styleTensor, genTensor], axis=0)
 
@@ -189,16 +177,12 @@ def styleTransfer(cData, sData, tData):
     loss = loss + (CONTENT_WEIGHT * contentLoss(contentOutput, gContentOutput))
 
     print("   Calculating style loss.")
-    # styleModels = [Model(inputs=model.input, outputs=model.get_layer(layer).output) for layer in styleLayerNames]
-    # styleOutputs = [outputDict[layerName][1, :, :, :] for layerName in styleLayerNames]
-    # gStyleOutputs = [outputDict[layerName][2, :, :, :] for layerName in styleLayerNames]
-    
     for layerName in styleLayerNames:
         styleLayer = outputDict[layerName]
         styleOutput = styleLayer[1, :, :, :]
         gStyleOutput = styleLayer[2, :, :, :]
-
         loss = loss + ((STYLE_WEIGHT / len(styleLayerNames)) * styleLoss(styleOutput, gStyleOutput))   #TODO: implement.
+
     loss = loss + (TOTAL_WEIGHT * totalLoss(genTensor))
 
     # TODO: Setup gradients or use K.gradients().
@@ -210,17 +194,24 @@ def styleTransfer(cData, sData, tData):
     print("   Beginning transfer.")
     for i in range(TRANSFER_ROUNDS):
         print("   Step %d." % i)
+        start = time.time()
         #TODO: perform gradient descent using fmin_l_bfgs_b.
-        x, tLoss, _ = fmin_l_bfgs_b(func=calculateLoss,
+        x, tLoss, info = fmin_l_bfgs_b(func=calculateLoss,
                                     x0=tData.flatten(),
                                     fprime=getGradients,
-                                    maxfun = 20)
+                                    maxfun=35)
         print("      Loss: %f." % tLoss)
+        print("      funcalls:", info['funcalls'])
+        print("      nit:", info['nit'])
+
         img = deprocessImage(x)
-        # saveFile = None   #TODO: Implement.
-        # imsave(SAVE_PATH, img)   #Uncomment when everything is working right.
-        img.save('%s-%s' % (SAVE_PATH, i))
-        print("      Image saved to \"%s\"." % SAVE_PATH)
+        if i % 5 == 0 or i == TRANSFER_ROUNDS - 1:
+          savePath = '%s-%s.jpg' % (SAVE_PATH, i)
+          imageio.imwrite('%s' % savePath, img)
+          print("      Image saved to \"%s\"" % savePath)
+
+        end = time.time()
+        print('      Completed in %ds' % (end - start))
     print("   Transfer complete.")
 
 
@@ -228,7 +219,7 @@ def styleTransfer(cData, sData, tData):
 #=========================<Main>================================================
 
 def parseArgs():
-    global CONTENT_IMG_PATH, STYLE_IMG_PATH, SAVE_PATH, CONTENT_WEIGHT, STYLE_WEIGHT
+    global CONTENT_IMG_PATH, STYLE_IMG_PATH, SAVE_PATH, CONTENT_WEIGHT, STYLE_WEIGHT, TOTAL_WEIGHT
     argv = sys.argv[1:]
     try:
         opts, _ = getopt.getopt(argv, 's:c:a:b:h')
@@ -237,9 +228,9 @@ def parseArgs():
 
     for opt, arg in opts:
         if opt == '-c':
-            STYLE_IMG_PATH = arg
-        elif opt == '-s':
             CONTENT_IMG_PATH = arg
+        elif opt == '-s':
+            STYLE_IMG_PATH = arg
         elif opt == 'a':
             if (arg < 0 or arg > 1):
                 raise ValueError('Content weight must be in [0, 1]')
@@ -258,8 +249,15 @@ def parseArgs():
 
     contentName = CONTENT_IMG_PATH[CONTENT_IMG_PATH.rfind('/') + 1 : CONTENT_IMG_PATH.rfind('.')]
     styleName = STYLE_IMG_PATH[STYLE_IMG_PATH.rfind('/') + 1 : STYLE_IMG_PATH.rfind('.')]
-    # timestamp = datetime.datetime.now().strftime('%Y-%m-%d-%H.%M.%S')
-    SAVE_PATH = './output/%s-%s' % (styleName, contentName)
+
+    # Make new directory to save outputs to
+    path = os.path.join('./output', '%s-%s' % (styleName, contentName))
+    if not os.path.isdir(path):
+      os.mkdir(path)
+    # Save copies of original content and style image for convenience
+    shutil.copyfile(CONTENT_IMG_PATH, '%s/%s.jpg' % (str(path), contentName))
+    shutil.copyfile(STYLE_IMG_PATH, '%s/%s.jpg' %(str(path), styleName))
+    SAVE_PATH = '%s/%s-%s' % (str(path), styleName, contentName)
 
 
 
@@ -270,7 +268,6 @@ def main():
     cData = preprocessData(raw[0])   # Content image.
     sData = preprocessData(raw[1])   # Style image.
     tData = preprocessData(raw[2])   # Transfer image.
-    # tData = np.random.randint(256, size=(CONTENT_IMG_H, CONTENT_IMG_W, 3)).astype('float32')
     styleTransfer(cData, sData, tData)
     print("Done. Goodbye.")
 
