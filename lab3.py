@@ -27,30 +27,26 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 CONTENT_IMG_PATH = ""           #TODO: Add this.
 STYLE_IMG_PATH = ""             #TODO: Add this.
 
-
 CONTENT_IMG_H = 500
 CONTENT_IMG_W = 500
 
 STYLE_IMG_H = 500
 STYLE_IMG_W = 500
 
-CONTENT_WEIGHT = 1    # Alpha weight.
-STYLE_WEIGHT = 1000      # Beta weight.
-TOTAL_WEIGHT = 100
+CONTENT_WEIGHT = 0.0001    # Alpha weight.
+STYLE_WEIGHT = 0.1      # Beta weight.
+TOTAL_WEIGHT = 0.001
 
-TRANSFER_ROUNDS = 50
+TRANSFER_ROUNDS = 100
 
 SAVE_PATH = None
 
 globalLoss = None
 globalGrads = None
 getLossAndGradients = None
+
 #=============================<Helper Fuctions>=================================
-'''
-TODO: implement this.
-This function should take the tensor and re-convert it to an image.
-'''
-def deprocessImage(img):
+def deprocessImage(img): # Deprocessing explained in https://harishnarayanan.org/writing/artistic-style-transfer/
     if K.image_data_format() == 'channels_first':
         img = img.reshape((3, CONTENT_IMG_H, CONTENT_IMG_W))
         img = img.transpose((1, 2, 0))
@@ -70,14 +66,6 @@ def gramMatrix(x):
     return gram
 
 
-def getOutput(layers, model):
-    output = list()
-    for layer in layers:
-        output.append(model.get_layer(layer).output)
-    print(output)
-    return output
-
-
 #========================<Loss Function Builder Functions>======================
 
 def styleLoss(style, gStyle):
@@ -90,12 +78,10 @@ def contentLoss(content, gContent):
     return K.sum(K.square(gContent - content))
 
 
-def totalLoss(x):
-    a = K.square(x[:, :CONTENT_IMG_H - 1, :CONTENT_IMG_W - 1, :] -
-                 x[:, 1:, :CONTENT_IMG_W - 1, :])
-    b = K.square(x[:, :CONTENT_IMG_H - 1, :CONTENT_IMG_W - 1, :] -
-                 x[:, :CONTENT_IMG_H - 1, 1:, :])
-    return K.sum(K.pow(a + b, 1.25))
+# def totalLoss(x):
+#     a = x[:, :, 1:, :] - x[:, :, :-1, :]
+#     b = x[:, 1:, :, :] - x[:, :-1, :, :]
+#     return tf.reduce_sum(tf.abs(a)) + tf.reduce_sum(tf.abs(b))
 
 
 def calculateLoss(x):
@@ -115,7 +101,6 @@ def getGradients(x):
     globalLoss = None
     globalGrads = None
     return grads
-
 
 
 #=========================<Pipeline Functions>==================================
@@ -146,6 +131,8 @@ def preprocessData(raw):
     return img
 
 
+
+
 '''
 TODO: Allot of stuff needs to be implemented in this function.
 First, make sure the model is set up properly.
@@ -162,6 +149,7 @@ def styleTransfer(cData, sData, tData):
     inputTensor = K.concatenate([contentTensor, styleTensor, genTensor], axis=0)
 
     model = vgg19.VGG19(include_top=False, weights='imagenet', input_tensor=inputTensor)
+    model.trainable = False
 
     outputDict = dict([(layer.name, layer.output) for layer in model.layers])
 
@@ -183,12 +171,12 @@ def styleTransfer(cData, sData, tData):
         gStyleOutput = styleLayer[2, :, :, :]
         loss = loss + ((STYLE_WEIGHT / len(styleLayerNames)) * styleLoss(styleOutput, gStyleOutput))   #TODO: implement.
 
-    loss = loss + (TOTAL_WEIGHT * totalLoss(genTensor))
+    # loss = loss + (TOTAL_WEIGHT * totalLoss(genTensor))
+    loss = loss * TOTAL_WEIGHT
 
     # TODO: Setup gradients or use K.gradients().
     global getLossAndGradients
     grads = K.gradients(loss, genTensor)[0]
-    assert grads is not None
     getLossAndGradients = K.function([genTensor], [loss, grads])
 
     print("   Beginning transfer.")
@@ -199,13 +187,13 @@ def styleTransfer(cData, sData, tData):
         x, tLoss, info = fmin_l_bfgs_b(func=calculateLoss,
                                     x0=tData.flatten(),
                                     fprime=getGradients,
-                                    maxfun=35)
+                                    maxiter=100)
         print("      Loss: %f." % tLoss)
         print("      funcalls:", info['funcalls'])
         print("      nit:", info['nit'])
 
         img = deprocessImage(x)
-        if i % 5 == 0 or i == TRANSFER_ROUNDS - 1:
+        if i % 10 == 0 or i == TRANSFER_ROUNDS - 1:
           savePath = '%s-%s.jpg' % (SAVE_PATH, i)
           imageio.imwrite('%s' % savePath, img)
           print("      Image saved to \"%s\"" % savePath)
@@ -215,43 +203,44 @@ def styleTransfer(cData, sData, tData):
     print("   Transfer complete.")
 
 
-
 #=========================<Main>================================================
 
-def parseArgs():
+def parseArgs(style, content):
     global CONTENT_IMG_PATH, STYLE_IMG_PATH, SAVE_PATH, CONTENT_WEIGHT, STYLE_WEIGHT, TOTAL_WEIGHT
-    argv = sys.argv[1:]
-    try:
-        opts, _ = getopt.getopt(argv, 's:c:a:b:h')
-    except:
-        raise ValueError('Unrecognized argument. See -h for help')
+    # argv = sys.argv[1:]
+    # try:
+    #     opts, _ = getopt.getopt(argv, 's:c:a:b:h')
+    # except:
+    #     raise ValueError('Unrecognized argument. See -h for help')
 
-    for opt, arg in opts:
-        if opt == '-c':
-            CONTENT_IMG_PATH = arg
-        elif opt == '-s':
-            STYLE_IMG_PATH = arg
-        elif opt == 'a':
-            if (arg < 0 or arg > 1):
-                raise ValueError('Content weight must be in [0, 1]')
-            CONTENT_WEIGHT = float(arg)
-        elif opt == 'b':
-            if (arg < 0 or arg > 1):
-                raise ValueError('Style weight must be in [0, 1]')
-            STYLE_WEIGHT = float(arg)
-        elif opt == '-h':
-            print('Usage: \n\
-                -c <path to content image>\n\
-                -s <path to style image>\n\
-                -a <content weight>\n\
-                -b <style weight>\n')
-            sys.exit()
+    # for opt, arg in opts:
+    #     if opt == '-c':
+    #         CONTENT_IMG_PATH = arg
+    #     elif opt == '-s':
+    #         STYLE_IMG_PATH = arg
+    #     elif opt == 'a':
+    #         if (arg < 0 or arg > 1):
+    #             raise ValueError('Content weight must be in [0, 1]')
+    #         CONTENT_WEIGHT = float(arg)
+    #     elif opt == 'b':
+    #         if (arg < 0 or arg > 1):
+    #             raise ValueError('Style weight must be in [0, 1]')
+    #         STYLE_WEIGHT = float(arg)
+    #     elif opt == '-h':
+    #         print('Usage: \n\
+    #             -c <path to content image>\n\
+    #             -s <path to style image>\n\
+    #             -a <content weight>\n\
+    #             -b <style weight>\n')
+    #         sys.exit()
+    CONTENT_IMG_PATH = content
+    STYLE_IMG_PATH = style
 
     contentName = CONTENT_IMG_PATH[CONTENT_IMG_PATH.rfind('/') + 1 : CONTENT_IMG_PATH.rfind('.')]
     styleName = STYLE_IMG_PATH[STYLE_IMG_PATH.rfind('/') + 1 : STYLE_IMG_PATH.rfind('.')]
 
     # Make new directory to save outputs to
-    path = os.path.join('./output', '%s-%s' % (styleName, contentName))
+    path = os.path.join('%s./output' % DRIVE_PREFIX, '%s-%s' % (styleName, contentName))
     if not os.path.isdir(path):
       os.mkdir(path)
     # Save copies of original content and style image for convenience
@@ -260,9 +249,8 @@ def parseArgs():
     SAVE_PATH = '%s/%s-%s' % (str(path), styleName, contentName)
 
 
-
 def main():
-    parseArgs()
+    parseArgs('%s./style/weeping-woman.jpg' % DRIVE_PREFIX, '%s./content/earth.jpg' % DRIVE_PREFIX)
     print("Starting style transfer program.")
     raw = getRawData()
     cData = preprocessData(raw[0])   # Content image.
@@ -270,7 +258,6 @@ def main():
     tData = preprocessData(raw[2])   # Transfer image.
     styleTransfer(cData, sData, tData)
     print("Done. Goodbye.")
-
 
 
 if __name__ == "__main__":
